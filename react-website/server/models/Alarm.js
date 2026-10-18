@@ -29,8 +29,41 @@ const alarmSchema = new mongoose.Schema({
     enabled: {
         type: Boolean,
         default: true
+    },
+    date: {
+        type: String,
+        default: null
+    },
+    lastActionDate: {
+        type: String,
+        default: null
+    },
+    scheduledAt: {
+        type: Date,
+        default: null
+    },
+    status: {
+        type: String,
+        enum: ["scheduled", "due", "opened", "taken", "missed"],
+        default: "scheduled"
+    },
+    openedAt: {
+        type: Date,
+        default: null
+    },
+    takenAt: {
+        type: Date,
+        default: null
+    },
+    acknowledgedAt: {
+        type: Date,
+        default: null
+    },
+    deviceId: {
+        type: String,
+        default: "ESP32_001"
     }
-});
+}, { timestamps: true });
 // One alarm slot per user
 alarmSchema.index(
     { userId: 1, index: 1 },

@@ -154,11 +154,29 @@ async function recordTakenDose({ userId, alarmIndex, medicine, dosage, scheduled
     scheduledTime: targetScheduledTime,
   });
 
+  // 5. Update Alarm model status to 'taken' and set takenAt
+  try {
+    const alarmQuery = {
+      $or: [{ medicine: targetMedicine }, { time: targetScheduledTime }]
+    };
+    if (userId) alarmQuery.userId = userId;
+    if (alarmIndex !== undefined && alarmIndex !== null) alarmQuery.index = Number(alarmIndex);
+
+    const activeAlarm = await Alarm.findOne(alarmQuery);
+    if (activeAlarm) {
+      activeAlarm.status = "taken";
+      activeAlarm.takenAt = activeAlarm.takenAt || new Date();
+      await activeAlarm.save();
+    }
+  } catch (err) {
+    console.error("[ESP32] Error updating Alarm status to taken:", err);
+  }
+
   console.log(`[ESP32] [TAKEN DOSE RECORDED] ${targetMedicine} (${targetDosage}) scheduled for ${targetScheduledTime}, taken at ${now} on ${today}`);
 
   return {
     status: "success",
-    message: "Medicine dose recorded successfully via ESP32 double-click.",
+    message: "Medicine dose recorded successfully via ESP32 confirmation.",
     dose: takenDose,
   };
 }
@@ -206,6 +224,11 @@ async function checkAndRecordMissedDoses() {
 
           console.log(`[ESP32] [MISSED DOSE DETECTED] ${alarm.medicine} was scheduled at ${alarm.time}. >15 mins passed without confirmation. Recorded to MissedDose.`);
           recordedMissed.push(missedDose);
+        }
+
+        if (alarm.status !== "taken" && alarm.status !== "missed") {
+          alarm.status = "missed";
+          await alarm.save();
         }
       }
     }
@@ -291,6 +314,17 @@ router.post("/button-press", async (req, res) => {
       // 1st click
       buttonState.clickCount = 1;
       buttonState.lastClickTime = now;
+
+      try {
+        const dueAlarm = await Alarm.findOne({ status: "due", enabled: true });
+        if (dueAlarm) {
+          dueAlarm.status = "opened";
+          dueAlarm.openedAt = dueAlarm.openedAt || new Date();
+          await dueAlarm.save();
+        }
+      } catch (err) {
+        console.error("[ESP32] Error setting status to opened on click 1:", err);
+      }
 
       if (buttonState.timer) clearTimeout(buttonState.timer);
       buttonState.timer = setTimeout(() => {

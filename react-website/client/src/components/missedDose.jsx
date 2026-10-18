@@ -19,10 +19,16 @@ export default function MissedDose() {
   const [missedDoses, setMissedDoses] = useState([]);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/missed-doses?limit=3`)
-      .then((response) => response.ok ? response.json() : Promise.reject())
-      .then(setMissedDoses)
-      .catch(() => setMissedDoses([]));
+    const fetchMissed = () => {
+      fetch(`${API_URL}/api/missed-doses?limit=3`)
+        .then((response) => response.ok ? response.json() : Promise.reject())
+        .then(setMissedDoses)
+        .catch(() => setMissedDoses([]));
+    };
+
+    fetchMissed();
+    const interval = setInterval(fetchMissed, 3000);
+    return () => clearInterval(interval);
   }, []);
 
   return (

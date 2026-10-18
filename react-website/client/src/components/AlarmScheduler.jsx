@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+
 export default function AlarmScheduler() {
     const [alarms, setAlarms] = useState([]);
 
@@ -75,7 +77,7 @@ export default function AlarmScheduler() {
             const user = JSON.parse(storedUser);
 
             const response = await fetch(
-                `http://localhost:3000/api/alarms/${user.id}`
+                `${API_URL}/api/alarms/${user.id}`
             );
 
             if (!response.ok) {

@@ -23,12 +23,18 @@ export default function TakenDose() {
   const [takenDoses, setTakenDoses] = useState([]);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/taken-doses?limit=3`)
-      .then((response) =>
-        response.ok ? response.json() : Promise.reject()
-      )
-      .then(setTakenDoses)
-      .catch(() => setTakenDoses([]));
+    const fetchTaken = () => {
+      fetch(`${API_URL}/api/taken-doses?limit=3`)
+        .then((response) =>
+          response.ok ? response.json() : Promise.reject()
+        )
+        .then(setTakenDoses)
+        .catch(() => setTakenDoses([]));
+    };
+
+    fetchTaken();
+    const interval = setInterval(fetchTaken, 3000);
+    return () => clearInterval(interval);
   }, []);
 
   return (

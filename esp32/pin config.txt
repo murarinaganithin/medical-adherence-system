@@ -1,0 +1,98 @@
+================================================================================
+SMART MEDICINE BOX - ESP32 PIN CONFIGURATION & HARDWARE SPECIFICATION
+================================================================================
+
+1. GPIO PIN MAPPING
+--------------------------------------------------------------------------------
+Component         ESP32 GPIO Pin    Pin Type      Electrical Connection
+--------------------------------------------------------------------------------
+Servo Motor       GPIO 19           OUTPUT (PWM)  Signal wire (usually Orange/Yellow)
+                  5V / VIN          POWER         VCC wire (Red)
+                  GND               GROUND        GND wire (Brown/Black)
+
+Status LED        GPIO 32           OUTPUT        Anode (+) through 220-330 ohm resistor
+                  GND               GROUND        Cathode (-) to ESP32 GND
+
+Push Button       GPIO 26           INPUT_PULLUP  One terminal to GPIO 26
+                  GND               GROUND        Other terminal to ESP32 GND
+                                                  (Uses ESP32 internal pull-up resistor;
+                                                   no external resistor needed!)
+--------------------------------------------------------------------------------
+
+2. CIRCUIT WIRING DIAGRAM
+--------------------------------------------------------------------------------
+
+           +-------------------------+
+           |       ESP32 BOARD       |
+           |                         |
+           |                 GPIO 19 +----[Signal/Orange]----> Servo Motor
+           |                         |                         [VCC -> 5V/VIN]
+           |                 GPIO 32 +----[220 ohm Resistor]--+ [GND -> GND]
+           |                         |                        |
+           |                         |                       (LED+)
+           |                         |                       (LED-)
+           |                     GND +------------------------+
+           |                         |                        |
+           |                 GPIO 26 +----+                   |
+           |                         |    |                   |
+           |                         | [PUSH BUTTON]          |
+           |                         |    |                   |
+           |                     GND +----+-------------------+
+           +-------------------------+
+
+Note on Power Supply:
+- When using SG90 or MG90S servo motors, the servo can draw transient current spikes
+  up to 500mA. It is recommended to power the ESP32 via a good 5V 2A micro-USB /
+  Type-C power adapter. If the ESP32 brownouts when the servo moves, place a 100uF - 470uF
+  capacitor across 5V and GND.
+
+--------------------------------------------------------------------------------
+3. WORKFLOW & STATE TRANSITION TABLE
+--------------------------------------------------------------------------------
+
+Step | State Name               | LED State | Servo Angle | Action & Next Step
+-----+--------------------------+-----------+-------------+---------------------------------------------------
+ 1   | STATE_IDLE               | OFF       | 0 degrees   | ESP32 polls GET /api/device/command every 5s.
+     |                          |           | (Closed)    | If server returns null, stays in IDLE.
+-----+--------------------------+-----------+-------------+---------------------------------------------------
+ 2   | STATE_ALARM_WAIT_OPEN    | ON (HIGH) | 0 degrees   | Server returned due reminder ID & details.
+     | (Alarm Triggered)        |           |             | LED turns ON to alert the user.
+     |                          |           |             | ESP32 waits for 1st button press.
+-----+--------------------------+-----------+-------------+---------------------------------------------------
+ 3   | Button Press 1           | Turns OFF | Moves to    | 1. LED turns OFF.
+     | (Compartment Opened)     |           | 90 degrees  | 2. Servo rotates to 90 degrees (opens compartment).
+     |                          |           | (Open)      | 3. ESP32 calls POST /api/schedules/:id/opened.
+     |                          |           |             | 4. Server records opening timestamp & status.
+     |                          |           |             | 5. Transitions to STATE_WAIT_CLOSE_CONFIRM.
+-----+--------------------------+-----------+-------------+---------------------------------------------------
+ 4   | User Takes Medicine      | OFF       | 90 degrees  | User takes the pills from the open box.
+-----+--------------------------+-----------+-------------+---------------------------------------------------
+ 5   | Button Press 2           | OFF       | Returns to  | 1. Servo rotates back to 0 degrees (closes box).
+     | (Intake Confirmation)    |           | 0 degrees   | 2. ESP32 calls POST /api/schedules/:id/taken.
+     |                          |           | (Closed)    | 3. Server records completion timestamp & 'taken'.
+     |                          |           |             | 4. Dashboard updates automatically.
+     |                          |           |             | 5. System transitions back to STATE_IDLE.
+--------------------------------------------------------------------------------
+* Clarification: The second button press represents the user's manual confirmation
+  that they took the medicine. The hardware does not independently verify ingestion.
+
+--------------------------------------------------------------------------------
+4. ARDUINO IDE / PLATFORMIO SETUP & LIBRARIES
+--------------------------------------------------------------------------------
+
+Required Libraries:
+1. ArduinoJson (by Benoît Blanchon) - version 6.x or 7.x
+   - Install via: Arduino IDE Library Manager -> Search "ArduinoJson" -> Install
+2. ESP32Servo (by Kevin Harrington, John K. Bennett)
+   - Install via: Arduino IDE Library Manager -> Search "ESP32Servo" -> Install
+3. WiFi (Built-in with ESP32 board package)
+4. HTTPClient (Built-in with ESP32 board package)
+
+Configuration in main.cpp:
+1. WIFI_SSID: Enter your local 2.4GHz Wi-Fi network name.
+2. WIFI_PASSWORD: Enter your Wi-Fi password.
+3. SERVER_BASE_URL: Set to http://<YOUR_PC_LOCAL_IP>:3000
+   (Find your PC's IP using `ipconfig` on Windows, e.g., http://192.168.1.150:3000).
+   Ensure your PC's firewall allows incoming connections on port 3000.
+4. Upload Speed: 115200 or 921600 baud.
+================================================================================

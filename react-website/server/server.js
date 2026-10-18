@@ -16,11 +16,17 @@ app.use(express.static("../client"));
 const medicalHistoryRoutes = require("./routes/medicalHistoryRoutes");
 const ocrReaderRoutes = require("./routes/ocrReaderRoutes");
 const { espRouter, startMissedDoseWatcher } = require("./esp");
+const { deviceRouter } = require("./routes/deviceRoutes");
+const { scheduleRouter, getScheduledDate, getTodayDateString } = require("./routes/scheduleRoutes");
 
 //using routes
 app.use("/api/medical-history", medicalHistoryRoutes);
 app.use("/api/ocr-reader", ocrReaderRoutes);
 app.use("/api/esp", espRouter);
+app.use("/api/device", deviceRouter);
+app.use("/api/schedules", scheduleRouter);
+app.use("/api/esp/device", deviceRouter);
+app.use("/api/esp/schedules", scheduleRouter);
 
 // ================================
 // MongoDB Connection
@@ -328,7 +334,7 @@ app.post("/api/missed-doses", async (req, res) => {
 // ======================================================
 app.post("/api/alarms", async (req, res) => {
     try {
-        const { userId, index, medicine, time, tablets } = req.body;
+        const { userId, index, medicine, time, tablets, date, deviceId } = req.body;
 
         if (
             !userId ||
@@ -348,15 +354,26 @@ app.post("/api/alarms", async (req, res) => {
             });
         }
 
+        const targetDate = date || null;
+        const scheduledAt = targetDate ? getScheduledDate(targetDate, time) : null;
+
         const alarm = await Alarm.findOneAndUpdate(
             { userId, index },
             {
                 userId,
                 index,
-                medicine,
+                medicine: medicine.trim(),
                 time,
+                date: targetDate,
+                scheduledAt,
                 tablets: Number(tablets),
-                enabled: true
+                enabled: true,
+                status: "scheduled",
+                deviceId: deviceId || "ESP32_001",
+                openedAt: null,
+                takenAt: null,
+                lastActionDate: null,
+                acknowledgedAt: null
             },
             {
                 new: true,
@@ -386,9 +403,18 @@ app.patch("/api/alarms/:userId/:index", async (req, res) => {
             });
         }
 
+        const updateData = { enabled: Boolean(enabled) };
+        if (Boolean(enabled)) {
+            updateData.status = "scheduled";
+            updateData.openedAt = null;
+            updateData.takenAt = null;
+            updateData.lastActionDate = null;
+            updateData.acknowledgedAt = null;
+        }
+
         const alarm = await Alarm.findOneAndUpdate(
             { userId, index: Number(index) },
-            { enabled: Boolean(enabled) },
+            updateData,
             {
                 new: true,
                 runValidators: true

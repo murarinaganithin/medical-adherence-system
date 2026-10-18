@@ -4,6 +4,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { Activity, UserPlus } from "lucide-react";
 import "./signup.css";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+
 function Signup() {
   const navigate = useNavigate();
 
@@ -40,7 +42,7 @@ function Signup() {
     try {
       setLoading(true);
 
-      const response = await fetch("http://localhost:3000/signup", {
+      const response = await fetch(`${API_URL}/signup`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

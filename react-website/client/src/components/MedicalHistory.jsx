@@ -18,6 +18,8 @@ import {
 } from "lucide-react";
 import "./MedicalHistory.css";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+
 export default function MedicalHistory() {
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -59,7 +61,7 @@ export default function MedicalHistory() {
     const fetchMedicalHistory = async (userId) => {
         try {
             const response = await fetch(
-                `http://localhost:3000/api/medical-history/${userId}`
+                `${API_URL}/api/medical-history/${userId}`
             );
 
             const data = await response.json();
@@ -171,7 +173,7 @@ export default function MedicalHistory() {
 
         try {
             const response = await fetch(
-                `http://localhost:3000/api/medical-history/${user.id}`,
+                `${API_URL}/api/medical-history/${user.id}`,
                 {
                     method: "PUT",
                     headers: {
