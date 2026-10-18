@@ -1,6 +1,8 @@
 import "./OCR.css";
 import { useRef, useState } from "react";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+
 export default function OCR() {
     const fileInputRef = useRef(null);
 
@@ -45,7 +47,7 @@ export default function OCR() {
             formData.append("image", file);
 
             const response = await fetch(
-                "http://localhost:3000/api/ocr-reader",
+                `${API_URL}/api/ocr-reader`,
                 {
                     method: "POST",
                     body: formData,
