@@ -50,7 +50,7 @@ function Alarm({ alarm, index }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId: user.id,
-          index,
+          index:index,
           medicine: medicine.trim(),
           time: alarmTime,
           tablets: Number(tabletCount)
