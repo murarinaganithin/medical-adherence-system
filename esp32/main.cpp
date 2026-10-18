@@ -31,14 +31,14 @@
 #include <ESP32Servo.h>
 
 // ---------- CHANGE THESE VALUES ----------
-const char* WIFI_NAME = "Sameer.2";
-const char* WIFI_PASSWORD = "password";
+const char* WIFI_NAME = "SSID";
+const char* WIFI_PASSWORD = "PASSWORD";
 
 // Use your computer's LAN IPv4 address, NOT localhost.
 const char* API_BASE = "http://192.168.29.3:3000";
 
 // Copy this from your logged-in website's localStorage user.id.
-const char* USER_ID = "sameer";
+const char* USER_ID = "USERID";
 
 const char* DEVICE_ID = "ESP32_001";
 // -----------------------------------------
