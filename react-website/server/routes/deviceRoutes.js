@@ -207,6 +207,119 @@ async function getNextDueReminder({ deviceId, userId } = {}) {
   return null;
 }
 
+
+router.get("/commands", async (req, res) => {
+  try {
+    const { deviceId, userId } = req.query;
+
+    if (!deviceId || !userId) {
+      return res.status(400).json({
+        message: "deviceId and userId are required"
+      });
+    }
+
+    const now = new Date();
+    const today = getTodayDateString(now);
+    const nowMinutes = timeToMinutes(getCurrentTimeString(now));
+
+    const alarms = await Alarm.find({
+      enabled: true,
+      deviceId,
+      userId
+    }).sort({ index: 1 });
+
+    const commands = [];
+
+    for (const alarm of alarms) {
+      const elapsed = nowMinutes - timeToMinutes(alarm.time);
+
+      // Already completed or missed this slot today.
+      if (
+        alarm.lastActionDate === today &&
+        ["taken", "missed"].includes(alarm.status)
+      ) {
+        continue;
+      }
+
+      // Keep an opened compartment active until its second button press.
+      if (
+        alarm.status === "opened" &&
+        alarm.lastActionDate === today
+      ) {
+        commands.push({
+          id: alarm._id.toString(),
+          index: alarm.index,
+          command: "ALARM",
+          status: "opened",
+          medicine: alarm.medicine,
+          tablets: alarm.tablets,
+          time: alarm.time
+        });
+        continue;
+      }
+
+      // Check whether this dose has already been recorded today.
+      const wasTaken = await TakenDose.findOne({
+        medicine: alarm.medicine,
+        scheduledDate: today,
+        scheduledTime: alarm.time
+      });
+
+      if (wasTaken) continue;
+
+      const wasMissed = await MissedDose.findOne({
+        medicine: alarm.medicine,
+        scheduledDate: today,
+        scheduledTime: alarm.time
+      });
+
+      if (wasMissed) continue;
+
+      // Due window: scheduled time through the next 14 minutes.
+      if (elapsed >= 0 && elapsed < MISSED_THRESHOLD_MINUTES) {
+        if (
+          alarm.status !== "due" ||
+          alarm.lastActionDate !== today
+        ) {
+          alarm.status = "due";
+          alarm.lastActionDate = today;
+          alarm.acknowledgedAt = new Date();
+          await alarm.save();
+        }
+
+        commands.push({
+          id: alarm._id.toString(),
+          index: alarm.index,
+          command: "ALARM",
+          status: "due",
+          medicine: alarm.medicine,
+          tablets: alarm.tablets,
+          time: alarm.time
+        });
+      } else if (elapsed >= MISSED_THRESHOLD_MINUTES) {
+        alarm.status = "missed";
+        alarm.lastActionDate = today;
+        await alarm.save();
+
+        await MissedDose.create({
+          medicine: alarm.medicine || "Prescribed Medicine",
+          dosage: `${alarm.tablets || 1} tablet${alarm.tablets > 1 ? "s" : ""}`,
+          scheduledDate: today,
+          scheduledTime: alarm.time
+        });
+      }
+    }
+
+    res.json(commands);
+  } catch (error) {
+    console.error("Fetch device commands error:", error);
+    res.status(500).json({
+      message: "Failed to fetch device commands"
+    });
+  }
+});
+
+
 /**
  * GET /api/device/command
  * Polled by ESP32 over HTTP to retrieve due reminder or null.

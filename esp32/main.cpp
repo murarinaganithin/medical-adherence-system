@@ -30,344 +30,226 @@
 #include <ArduinoJson.h>
 #include <ESP32Servo.h>
 
-// ======================================================
-// USER CONFIGURATION (Configure for your network)
-// ======================================================
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+// ---------- CHANGE THESE VALUES ----------
+const char* WIFI_NAME = "Sameer.2";
+const char* WIFI_PASSWORD = "password";
 
-// Replace with your PC/server's local network IP address (e.g., http://192.168.1.150:3000)
-// Do NOT use "localhost" or "127.0.0.1" from the ESP32.
-const char* SERVER_BASE_URL = "http://192.168.1.100:3000";
-const char* DEVICE_ID       = "ESP32_001";
+// Use your computer's LAN IPv4 address, NOT localhost.
+const char* API_BASE = "http://192.168.29.3:3000";
 
-// ======================================================
-// PIN DEFINITIONS
-// ======================================================
-#define SERVO_PIN   19   // Servo signal pin (PWM)
-#define LED_PIN     32   // Status LED pin
-#define BUTTON_PIN  26   // Push button input pin (Internal Pull-Up enabled)
+// Copy this from your logged-in website's localStorage user.id.
+const char* USER_ID = "sameer";
 
-// ======================================================
-// TIMING CONSTANTS
-// ======================================================
-const unsigned long POLL_INTERVAL_MS = 5000;   // Poll server every 5 seconds
-const unsigned long DEBOUNCE_DELAY_MS = 50;    // Button debounce threshold
+const char* DEVICE_ID = "ESP32_001";
+// -----------------------------------------
 
-// ======================================================
-// SYSTEM STATES
-// ======================================================
-enum SystemState {
-  STATE_IDLE,                 // Waiting for alarm from server
-  STATE_ALARM_WAIT_OPEN,      // LED ON, waiting for Button Press 1
-  STATE_WAIT_CLOSE_CONFIRM    // Compartment OPEN (90 deg), waiting for Button Press 2
-};
+const int ledPins[3] = {32, 33, 25};
+const int buttonPins[3] = {26, 27, 14};
+const int servoPins[3] = {13, 18, 19};
 
-SystemState currentState = STATE_IDLE;
-String activeReminderId = "";
-String activeMedicine = "";
-int activeTablets = 1;
+Servo servos[3];
 
-Servo boxServo;
+String alarmIds[3];
+bool slotOpened[3] = {false, false, false};
+
+int lastButtonReading[3] = {HIGH, HIGH, HIGH};
+int stableButtonState[3] = {HIGH, HIGH, HIGH};
+unsigned long lastDebounceTime[3] = {0, 0, 0};
+
+const unsigned long DEBOUNCE_MS = 40;
+const unsigned long POLL_INTERVAL_MS = 2000;
 unsigned long lastPollTime = 0;
 
-// Button debouncing variables
-int lastButtonState = HIGH;
-int buttonState = HIGH;
-unsigned long lastDebounceTime = 0;
+// Send an event to the existing backend route.
+bool postEvent(int slot, const char* eventName) {
+  if (alarmIds[slot].length() == 0) return false;
 
-// ======================================================
-// HELPER FUNCTIONS: HARDWARE CONTROL
-// ======================================================
+  HTTPClient http;
+  String url = String(API_BASE) + "/api/schedules/" +
+               alarmIds[slot] + "/" + eventName;
 
-void openCompartment() {
-  Serial.println("[HARDWARE] Opening compartment -> Servo 90 degrees");
-  boxServo.write(90);
-}
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
 
-void closeCompartment() {
-  Serial.println("[HARDWARE] Closing compartment -> Servo 0 degrees");
-  boxServo.write(0);
-}
+  int code = http.POST("{}");
+  String response = http.getString();
 
-void turnLedOn() {
-  Serial.println("[HARDWARE] Turning LED ON");
-  digitalWrite(LED_PIN, HIGH);
-}
+  Serial.printf(
+    "Slot %d, event %s, HTTP %d\n",
+    slot + 1, eventName, code
+  );
 
-void turnLedOff() {
-  Serial.println("[HARDWARE] Turning LED OFF");
-  digitalWrite(LED_PIN, LOW);
-}
-
-// ======================================================
-// HELPER FUNCTIONS: NETWORK & HTTP
-// ======================================================
-
-void connectToWiFi() {
-  Serial.print("[WIFI] Connecting to ");
-  Serial.println(WIFI_SSID);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
+  if (code < 200 || code >= 300) {
+    Serial.println(response);
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WIFI] Connected successfully!");
-    Serial.print("[WIFI] IP Address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\n[WIFI] Connection failed. Will retry in loop.");
-  }
+  http.end();
+  return code >= 200 && code < 300;
 }
 
-/**
- * Poll server: GET /api/device/command?deviceId=...
- * Checks if a reminder is currently due for this device.
- */
-void pollDeviceCommand() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WIFI] Disconnected. Reconnecting...");
-    connectToWiFi();
+// Fetch all currently due/opened alarms.
+void pollAlarms() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+
+  String url = String(API_BASE) +
+    "/api/device/commands?deviceId=" + DEVICE_ID +
+    "&userId=" + USER_ID;
+
+  http.begin(url);
+  int code = http.GET();
+
+  if (code != 200) {
+    Serial.printf("Alarm fetch failed: HTTP %d\n", code);
+    http.end();
     return;
   }
 
-  HTTPClient http;
-  String url = String(SERVER_BASE_URL) + "/api/device/command?deviceId=" + String(DEVICE_ID);
-  
-  http.begin(url);
-  http.setTimeout(4000);
+  String payload = http.getString();
+  http.end();
 
-  int httpCode = http.GET();
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload);
 
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
+  if (error) {
+    Serial.print("JSON error: ");
+    Serial.println(error.c_str());
+    return;
+  }
 
-    // If server returned "null", no reminder is due
-    if (payload == "null" || payload.length() < 5) {
-      // No active command
-      http.end();
-      return;
+  bool seen[3] = {false, false, false};
+  JsonArray commands = doc.as<JsonArray>();
+
+  for (JsonObject alarm : commands) {
+    int index = alarm["index"] | -1;
+
+    if (index < 0 || index > 2) continue;
+
+    seen[index] = true;
+
+    String id = alarm["id"] | "";
+    String status = alarm["status"] | "";
+
+    alarmIds[index] = id;
+
+    if (status == "due") {
+      slotOpened[index] = false;
+      digitalWrite(ledPins[index], HIGH);
+
+      Serial.printf(
+        "Compartment %d is due: %s\n",
+        index + 1,
+        alarm["medicine"] | "Medicine"
+      );
+    } else if (status == "opened") {
+      slotOpened[index] = true;
+      digitalWrite(ledPins[index], LOW);
+      servos[index].write(90);
     }
+  }
 
-    // Parse JSON response
-    StaticJsonDocument<512> doc;
-    DeserializationError error = deserializeJson(doc, payload);
+  // Slots not returned by the server are inactive.
+  for (int i = 0; i < 3; i++) {
+    if (!seen[i]) {
+      digitalWrite(ledPins[i], LOW);
+      servos[i].write(0);
+      slotOpened[i] = false;
+      alarmIds[i] = "";
+    }
+  }
+}
 
-    if (!error) {
-      const char* command = doc["command"];
-      const char* id = doc["id"] ? doc["id"] : doc["_id"];
+// Each button controls only its matching compartment.
+void handleButton(int slot) {
+  if (alarmIds[slot].length() == 0) {
+    Serial.printf("No active alarm for compartment %d\n", slot + 1);
+    return;
+  }
 
-      if (id && command && String(command) == "ALARM") {
-        activeReminderId = String(id);
-        activeMedicine = doc["medicine"] | "Prescribed Medicine";
-        activeTablets = doc["tablets"] | 1;
+  if (!slotOpened[slot]) {
+    // First press: open compartment.
+    digitalWrite(ledPins[slot], LOW);
+    servos[slot].write(90);
 
-        Serial.println("========================================");
-        Serial.println("[ALARM RECEIVED]");
-        Serial.print("Reminder ID: "); Serial.println(activeReminderId);
-        Serial.print("Medicine:    "); Serial.println(activeMedicine);
-        Serial.print("Tablets:     "); Serial.println(activeTablets);
-        Serial.println("========================================");
-
-        // Transition to ALARM state: Turn LED ON, wait for Button 1
-        turnLedOn();
-        currentState = STATE_ALARM_WAIT_OPEN;
-      }
+    if (postEvent(slot, "opened")) {
+      slotOpened[slot] = true;
+      Serial.printf("Compartment %d opened\n", slot + 1);
     } else {
-      Serial.print("[JSON] Parse error: ");
-      Serial.println(error.c_str());
+      // Keep the dose pending if the server update fails.
+      servos[slot].write(0);
+      digitalWrite(ledPins[slot], HIGH);
     }
   } else {
-    Serial.print("[HTTP] GET /api/device/command failed, code: ");
-    Serial.println(httpCode);
-  }
+    // Second press: confirm dose taken.
+    servos[slot].write(0);
 
-  http.end();
+    if (postEvent(slot, "taken")) {
+      slotOpened[slot] = false;
+      alarmIds[slot] = "";
+      digitalWrite(ledPins[slot], LOW);
+
+      Serial.printf("Compartment %d marked taken\n", slot + 1);
+    } else {
+      // Restore the opened state if confirmation fails.
+      servos[slot].write(90);
+    }
+  }
 }
 
-/**
- * Report compartment opened to server: POST /api/schedules/:id/opened
- */
-bool reportCompartmentOpened(String scheduleId) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  HTTPClient http;
-  String url = String(SERVER_BASE_URL) + "/api/schedules/" + scheduleId + "/opened";
-
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(4000);
-
-  int httpCode = http.POST("{}");
-
-  bool success = (httpCode == 200 || httpCode == 201);
-  if (success) {
-    Serial.println("[HTTP] Successfully reported compartment OPENED to server.");
-  } else {
-    Serial.print("[HTTP] Failed to report compartment opened. Code: ");
-    Serial.println(httpCode);
-  }
-
-  http.end();
-  return success;
-}
-
-/**
- * Report medicine completion to server: POST /api/schedules/:id/taken
- * Note: Represents the user's manual confirmation that they took the medicine.
- */
-bool reportMedicineTaken(String scheduleId) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  HTTPClient http;
-  String url = String(SERVER_BASE_URL) + "/api/schedules/" + scheduleId + "/taken";
-
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(4000);
-
-  int httpCode = http.POST("{}");
-
-  bool success = (httpCode == 200 || httpCode == 201);
-  if (success) {
-    Serial.println("[HTTP] Successfully reported medicine TAKEN to server.");
-  } else {
-    Serial.print("[HTTP] Failed to report medicine taken. Code: ");
-    Serial.println(httpCode);
-  }
-
-  http.end();
-  return success;
-}
-
-// ======================================================
-// ARDUINO SETUP
-// ======================================================
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
-  Serial.println("\n--- Starting Smart Medicine Box ESP32 Firmware ---");
+  for (int i = 0; i < 3; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    digitalWrite(ledPins[i], LOW);
 
-  // Configure LED
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+    pinMode(buttonPins[i], INPUT_PULLUP);
 
-  // Configure Button with internal pull-up (Active LOW: unpressed=HIGH, pressed=LOW)
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
+    servos[i].setPeriodHertz(50);
+    servos[i].attach(servoPins[i], 500, 2400);
+    servos[i].write(0);
+  }
 
-  // Configure Servo
-  ESP32PWM::allocateTimer(0);
-  boxServo.setPeriodHertz(50);             // Standard 50Hz servo
-  boxServo.attach(SERVO_PIN, 500, 2400);   // Standard PWM pulse width
-  boxServo.write(0);                       // Start closed at 0 degrees
-  delay(500);
+  WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
 
-  Serial.println("[PINS] Initialized:");
-  Serial.println("  - Servo on GPIO 19 (at 0 degrees)");
-  Serial.println("  - LED on GPIO 32 (OFF)");
-  Serial.println("  - Button on GPIO 26 (INPUT_PULLUP)");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
 
-  // Connect Wi-Fi
-  connectToWiFi();
+  Serial.println("\nWi-Fi connected");
+  Serial.print("ESP32 IP: ");
+  Serial.println(WiFi.localIP());
+
+  pollAlarms();
 }
 
-// ======================================================
-// ARDUINO MAIN LOOP
-// ======================================================
 void loop() {
-  unsigned long currentMillis = millis();
+  for (int i = 0; i < 3; i++) {
+    int reading = digitalRead(buttonPins[i]);
 
-  // --------------------------------------------------
-  // 1. BUTTON DEBOUNCING & PRESS DETECTION
-  // --------------------------------------------------
-  int reading = digitalRead(BUTTON_PIN);
+    if (reading != lastButtonReading[i]) {
+      lastDebounceTime[i] = millis();
+    }
 
-  if (reading != lastButtonState) {
-    lastDebounceTime = currentMillis;
-  }
+    if (millis() - lastDebounceTime[i] >= DEBOUNCE_MS) {
+      if (reading != stableButtonState[i]) {
+        stableButtonState[i] = reading;
 
-  bool buttonPressedEvent = false;
-
-  if ((currentMillis - lastDebounceTime) > DEBOUNCE_DELAY_MS) {
-    if (reading != buttonState) {
-      buttonState = reading;
-      // Active LOW: Transition from HIGH to LOW means button was pressed
-      if (buttonState == LOW) {
-        buttonPressedEvent = true;
+        // INPUT_PULLUP means LOW is pressed.
+        if (stableButtonState[i] == LOW) {
+          handleButton(i);
+        }
       }
     }
-  }
-  lastButtonState = reading;
 
-  // --------------------------------------------------
-  // 2. STATE MACHINE EXECUTION
-  // --------------------------------------------------
-  switch (currentState) {
-
-    // ------------------------------------------------
-    // STATE_IDLE: Normal mode, poll server every 5 seconds
-    // ------------------------------------------------
-    case STATE_IDLE:
-      if (currentMillis - lastPollTime >= POLL_INTERVAL_MS) {
-        lastPollTime = currentMillis;
-        pollDeviceCommand();
-      }
-      break;
-
-    // ------------------------------------------------
-    // STATE_ALARM_WAIT_OPEN:
-    // LED is ON. Waiting for 1st button press.
-    // ------------------------------------------------
-    case STATE_ALARM_WAIT_OPEN:
-      if (buttonPressedEvent) {
-        Serial.println("\n[EVENT] Button Press 1 detected!");
-        
-        // 1. Turn LED OFF
-        turnLedOff();
-
-        // 2. Open servo to 90 degrees
-        openCompartment();
-
-        // 3. Notify server that compartment was opened
-        reportCompartmentOpened(activeReminderId);
-
-        // 4. Transition to waiting for 2nd button press
-        Serial.println("[STATE] Compartment open. Waiting for Button Press 2 (intake confirmation)...");
-        currentState = STATE_WAIT_CLOSE_CONFIRM;
-      }
-      break;
-
-    // ------------------------------------------------
-    // STATE_WAIT_CLOSE_CONFIRM:
-    // Compartment is at 90 deg. Waiting for 2nd button press.
-    // ------------------------------------------------
-    case STATE_WAIT_CLOSE_CONFIRM:
-      if (buttonPressedEvent) {
-        Serial.println("\n[EVENT] Button Press 2 detected (Medicine Taken Confirmation)!");
-
-        // 1. Return servo to 0 degrees
-        closeCompartment();
-
-        // 2. Notify server that medicine was taken
-        reportMedicineTaken(activeReminderId);
-
-        // 3. Reset reminder state and return to IDLE
-        Serial.println("[STATE] Medicine completed. Returning to IDLE polling.\n");
-        activeReminderId = "";
-        activeMedicine = "";
-        currentState = STATE_IDLE;
-        lastPollTime = currentMillis; // Reset timer so it doesn't poll immediately
-      }
-      break;
+    lastButtonReading[i] = reading;
   }
 
-  delay(10); // Small loop yield for ESP32 background tasks (Wi-Fi stack)
+  if (millis() - lastPollTime >= POLL_INTERVAL_MS) {
+    lastPollTime = millis();
+    pollAlarms();
+  }
 }
