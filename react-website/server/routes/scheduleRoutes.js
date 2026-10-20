@@ -63,6 +63,7 @@ router.post("/:id/opened", async (req, res) => {
         schedule.status = "opened";
         schedule.openedAt = schedule.openedAt || now;
         schedule.lastActionDate = today;
+        schedule.snoozedUntil = null;
         await schedule.save();
       }
 
@@ -247,6 +248,76 @@ router.post("/:id/ack", async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: "Failed to acknowledge schedule.", error: error.message });
+  }
+});
+
+/*
+ * POST /api/schedules/:id/snooze
+ * Snooze an active medicine reminder for 10 minutes.
+ */
+router.post("/:id/snooze", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid schedule ID format."
+      });
+    }
+
+    const minutes = Number(req.body.minutes ?? 10);
+
+    if (!Number.isFinite(minutes) || minutes !== 10) {
+      return res.status(400).json({
+        success: false,
+        message: "Snooze duration must be 10 minutes."
+      });
+    }
+
+    const schedule = await Alarm.findById(id);
+
+    if (!schedule) {
+      return res.status(404).json({
+        success: false,
+        message: "Schedule not found."
+      });
+    }
+
+    if (!schedule.enabled ||
+        ["opened", "taken", "missed"].includes(schedule.status)) {
+      return res.status(400).json({
+        success: false,
+        message: "This reminder cannot be snoozed."
+      });
+    }
+
+    const now = new Date();
+
+    schedule.snoozedUntil = new Date(
+      now.getTime() + 10 * 60 * 1000
+    );
+
+    await schedule.save();
+
+    console.log(
+      `[Snooze] ${schedule.medicine} snoozed until ${schedule.snoozedUntil}`
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Reminder snoozed for 10 minutes.",
+      scheduleId: schedule._id,
+      snoozedUntil: schedule.snoozedUntil
+    });
+  } catch (error) {
+    console.error("[Snooze] Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to snooze reminder.",
+      error: error.message
+    });
   }
 });
 

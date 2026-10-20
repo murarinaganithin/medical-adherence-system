@@ -59,6 +59,10 @@ const alarmSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
+        snoozedUntil: {
+        type: Date,
+        default: null
+    },
     deviceId: {
         type: String,
         default: "ESP32_001"
