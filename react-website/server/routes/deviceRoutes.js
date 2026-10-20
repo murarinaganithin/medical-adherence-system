@@ -231,8 +231,15 @@ router.get("/commands", async (req, res) => {
     const commands = [];
 
     for (const alarm of alarms) {
-      const elapsed = nowMinutes - timeToMinutes(alarm.time);
-
+      const elapsed =
+          alarm.status === "due" &&
+          alarm.lastActionDate === today &&
+          alarm.acknowledgedAt
+            ? Math.floor(
+                (now.getTime() -
+                  new Date(alarm.acknowledgedAt).getTime()) / 60000
+              )
+            : nowMinutes - timeToMinutes(alarm.time);
       // Already completed or missed this slot today.
       if (
         alarm.lastActionDate === today &&
@@ -255,6 +262,49 @@ router.get("/commands", async (req, res) => {
           tablets: alarm.tablets,
           time: alarm.time
         });
+        continue;
+      }
+      
+      // Keep snoozed alarms visible to the ESP32, but inactive.
+      if (
+        alarm.snoozedUntil &&
+        new Date(alarm.snoozedUntil) > now
+      ) {
+        commands.push({
+          id: alarm._id.toString(),
+          index: alarm.index,
+          command: "ALARM",
+          status: "snoozed",
+          medicine: alarm.medicine,
+          tablets: alarm.tablets,
+          time: alarm.time
+        });
+
+        continue;
+      }
+
+      // If snooze has expired, restart the reminder window.
+      if (
+        alarm.snoozedUntil &&
+        new Date(alarm.snoozedUntil) <= now
+      ) {
+        alarm.snoozedUntil = null;
+        alarm.status = "due";
+        alarm.lastActionDate = today;
+        alarm.acknowledgedAt = now;
+
+        await alarm.save();
+
+        commands.push({
+          id: alarm._id.toString(),
+          index: alarm.index,
+          command: "ALARM",
+          status: "due",
+          medicine: alarm.medicine,
+          tablets: alarm.tablets,
+          time: alarm.time
+        });
+
         continue;
       }
 
