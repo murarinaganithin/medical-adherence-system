@@ -1,14 +1,17 @@
-
 /*
- * Smart Medicine Box
- * ESP32 + Wi-Fi + Node.js Backend + 3 Compartments
- * DS3231 RTC + I2C LCD
+ * SMART MEDICINE BOX
+ * ESP32 + WiFi + Node.js + MongoDB
+ * 3 Compartments + RTC + LCD + 10-minute Snooze
  *
  * LEDs:    32, 33, 25
  * Buttons: 26, 27, 14
  * Servos:  13, 18, 19
- * I2C SDA:  21
- * I2C SCL:  22
+ * Snooze:   4
+ * Speaker: 23 (transistor-controlled KEY1)
+ * SDA:     21
+ * SCL:     22
+ *
+ * DFPlayer RX/TX are disconnected.
  */
 
 #include <WiFi.h>
@@ -19,18 +22,32 @@
 #include <RTClib.h>
 #include <LiquidCrystal_I2C.h>
 
-// ---------- Wi-Fi and Backend ----------
-const char* WIFI_NAME = "SSID";
-const char* WIFI_PASSWORD = "Password";
+// ---------- WiFi and Backend ----------
+const char* WIFI_NAME = "Sameer.2";
+const char* WIFI_PASSWORD = "password";
 
 const char* API_BASE = "http://192.168.29.3:3000";
-const char* USER_ID = "USER.ID";
+const char* USER_ID = "6ad4ab397eec8c0d40e091b4";
 const char* DEVICE_ID = "ESP32_001";
 
 // ---------- Hardware Pins ----------
 const int ledPins[3] = {32, 33, 25};
 const int buttonPins[3] = {26, 27, 14};
 const int servoPins[3] = {13, 18, 19};
+
+const int snoozeButtonPin = 4;
+const int speakerKeyPin = 23;
+
+// ---------- Speaker Timing ----------
+const unsigned long SPEAKER_PULSE_MS = 300;
+const unsigned long SPEAKER_REPEAT_MS = 5000;
+
+unsigned long lastSpeakerTrigger[3] = {0, 0, 0};
+bool speakerTriggeredBefore[3] = {false, false, false};
+
+bool speakerPulseActive = false;
+unsigned long speakerPulseStartedAt = 0;
+int speakerPulseSlot = -1;
 
 // ---------- RTC and LCD ----------
 RTC_DS3231 rtc;
@@ -46,35 +63,33 @@ String medicineNames[3] = {
 bool slotOpened[3] = {false, false, false};
 bool alarmActive[3] = {false, false, false};
 
+// ---------- Compartment Buttons ----------
 int lastButtonReading[3] = {HIGH, HIGH, HIGH};
 int stableButtonState[3] = {HIGH, HIGH, HIGH};
-
 unsigned long lastDebounceTime[3] = {0, 0, 0};
 
+// ---------- Snooze Button ----------
+int lastSnoozeReading = HIGH;
+int stableSnoozeState = HIGH;
+unsigned long lastSnoozeDebounceTime = 0;
+
+// ---------- Timing ----------
 const unsigned long DEBOUNCE_MS = 40;
 const unsigned long POLL_INTERVAL_MS = 2000;
 const unsigned long BLINK_INTERVAL_MS = 500;
 
 unsigned long lastPollTime = 0;
 unsigned long lastBlinkTime = 0;
-
 bool backlightOn = true;
-
-// ---------- RTC Date ----------
-String dateString(DateTime now) {
-  char buffer[11];
-
-  snprintf(
-    buffer, sizeof(buffer), "%04d-%02d-%02d",
-    now.year(), now.month(), now.day()
-  );
-
-  return String(buffer);
-}
 
 // ---------- Send Event to Backend ----------
 bool postEvent(int slot, const char* eventName) {
   if (alarmIds[slot].length() == 0) {
+    return false;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Cannot send event: WiFi disconnected");
     return false;
   }
 
@@ -101,6 +116,145 @@ bool postEvent(int slot, const char* eventName) {
   http.end();
 
   return code >= 200 && code < 300;
+}
+
+// ---------- Stop KEY1 Trigger for One Slot ----------
+void stopSpeakerTriggerForSlot(int slot) {
+  if (speakerPulseActive && speakerPulseSlot == slot) {
+    digitalWrite(speakerKeyPin, LOW);
+    speakerPulseActive = false;
+    speakerPulseSlot = -1;
+  }
+}
+
+// ---------- Speaker Trigger Every 5 Seconds ----------
+void updateSpeakerTrigger() {
+  unsigned long now = millis();
+
+  // End the current 300 ms trigger pulse.
+  if (speakerPulseActive &&
+      now - speakerPulseStartedAt >= SPEAKER_PULSE_MS) {
+
+    digitalWrite(speakerKeyPin, LOW);
+
+    speakerPulseActive = false;
+    speakerPulseSlot = -1;
+  }
+
+  // Only one KEY1 trigger at a time.
+  if (speakerPulseActive) {
+    return;
+  }
+
+  // Trigger active, unopened compartments.
+  for (int i = 0; i < 3; i++) {
+    if (alarmActive[i] &&
+        !slotOpened[i] &&
+        (!speakerTriggeredBefore[i] ||
+         now - lastSpeakerTrigger[i] >= SPEAKER_REPEAT_MS)) {
+
+      // HIGH turns the external transistor ON.
+      // The transistor momentarily connects KEY1 to GND.
+      digitalWrite(speakerKeyPin, HIGH);
+
+      speakerPulseActive = true;
+      speakerPulseStartedAt = now;
+      speakerPulseSlot = i;
+
+      lastSpeakerTrigger[i] = now;
+      speakerTriggeredBefore[i] = true;
+
+      Serial.printf(
+        "Speaker KEY1 trigger: compartment %d\n",
+        i + 1
+      );
+
+      break;
+    }
+  }
+}
+
+// ---------- Snooze One Compartment ----------
+bool postSnooze(int slot) {
+  if (alarmIds[slot].length() == 0) {
+    Serial.printf(
+      "No alarm ID for compartment %d\n",
+      slot + 1
+    );
+    return false;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Cannot snooze: WiFi disconnected");
+    return false;
+  }
+
+  HTTPClient http;
+
+  String url = String(API_BASE) + "/api/schedules/" +
+               alarmIds[slot] + "/snooze";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  int code = http.POST("{\"minutes\":10}");
+  String response = http.getString();
+
+  Serial.printf(
+    "Compartment %d snooze, HTTP %d\n",
+    slot + 1, code
+  );
+
+  if (code < 200 || code >= 300) {
+    Serial.println(response);
+    http.end();
+    return false;
+  }
+
+  http.end();
+
+  stopSpeakerTriggerForSlot(slot);
+
+  alarmActive[slot] = false;
+  digitalWrite(ledPins[slot], LOW);
+
+  Serial.printf(
+    "Compartment %d snoozed for 10 minutes\n",
+    slot + 1
+  );
+
+  return true;
+}
+
+// ---------- Snooze Button ----------
+void handleSnoozeButton() {
+  bool foundAlarm = false;
+  bool snoozedAlarm = false;
+
+  for (int i = 0; i < 3; i++) {
+    if (alarmActive[i] &&
+        !slotOpened[i] &&
+        alarmIds[i].length() > 0) {
+
+      foundAlarm = true;
+
+      if (postSnooze(i)) {
+        snoozedAlarm = true;
+      }
+    }
+  }
+
+  if (!foundAlarm) {
+    Serial.println("No due medicine to snooze");
+  }
+
+  if (snoozedAlarm) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Snoozed 10 min");
+    lcd.setCursor(0, 1);
+    lcd.print("Reminder paused");
+  }
 }
 
 // ---------- Fetch Alarms from Backend ----------
@@ -154,10 +308,7 @@ void pollAlarms() {
 
     seen[index] = true;
 
-    alarmIds[index] = String(
-      alarm["id"] | ""
-    );
-
+    alarmIds[index] = String(alarm["id"] | "");
     medicineNames[index] = String(
       alarm["medicine"] | "Medicine"
     );
@@ -166,6 +317,7 @@ void pollAlarms() {
 
     if (status == "due") {
       alarmActive[index] = true;
+      slotOpened[index] = false;
 
       digitalWrite(ledPins[index], HIGH);
 
@@ -176,29 +328,54 @@ void pollAlarms() {
       );
     }
     else if (status == "opened") {
+      stopSpeakerTriggerForSlot(index);
+
       alarmActive[index] = false;
       slotOpened[index] = true;
 
       digitalWrite(ledPins[index], LOW);
       servos[index].write(90);
+
+      Serial.printf(
+        "Compartment %d opened on backend\n",
+        index + 1
+      );
+    }
+    else if (status == "snoozed") {
+      stopSpeakerTriggerForSlot(index);
+
+      alarmActive[index] = false;
+      slotOpened[index] = false;
+
+      digitalWrite(ledPins[index], LOW);
+
+      Serial.printf(
+        "Compartment %d snoozed by backend\n",
+        index + 1
+      );
     }
   }
 
   // Reset slots not returned by the backend.
   for (int i = 0; i < 3; i++) {
     if (!seen[i]) {
+      stopSpeakerTriggerForSlot(i);
+
       digitalWrite(ledPins[i], LOW);
 
       alarmActive[i] = false;
       slotOpened[i] = false;
       alarmIds[i] = "";
 
+      speakerTriggeredBefore[i] = false;
+      lastSpeakerTrigger[i] = 0;
+
       servos[i].write(0);
     }
   }
 }
 
-// ---------- Button Handling ----------
+// ---------- Compartment Button ----------
 void handleButton(int slot) {
   if (alarmIds[slot].length() == 0) {
     Serial.printf(
@@ -210,6 +387,8 @@ void handleButton(int slot) {
 
   if (!slotOpened[slot]) {
     // First press: open compartment.
+    stopSpeakerTriggerForSlot(slot);
+
     servos[slot].write(90);
     digitalWrite(ledPins[slot], LOW);
 
@@ -223,7 +402,6 @@ void handleButton(int slot) {
       );
     }
     else {
-      // Keep reminder active if server update fails.
       servos[slot].write(0);
       digitalWrite(ledPins[slot], HIGH);
       alarmActive[slot] = true;
@@ -231,6 +409,8 @@ void handleButton(int slot) {
   }
   else {
     // Second press: confirm medicine taken.
+    stopSpeakerTriggerForSlot(slot);
+
     servos[slot].write(0);
 
     if (postEvent(slot, "taken")) {
@@ -238,7 +418,11 @@ void handleButton(int slot) {
       alarmActive[slot] = false;
 
       alarmIds[slot] = "";
+
       digitalWrite(ledPins[slot], LOW);
+
+      speakerTriggeredBefore[slot] = false;
+      lastSpeakerTrigger[slot] = 0;
 
       Serial.printf(
         "Compartment %d marked taken\n",
@@ -246,7 +430,6 @@ void handleButton(int slot) {
       );
     }
     else {
-      // Restore opened state if server update fails.
       servos[slot].write(90);
     }
   }
@@ -256,7 +439,6 @@ void handleButton(int slot) {
 void updateLCD(DateTime now) {
   int activeSlot = -1;
 
-  // Display the first due medicine.
   for (int i = 0; i < 3; i++) {
     if (alarmActive[i]) {
       activeSlot = i;
@@ -265,7 +447,6 @@ void updateLCD(DateTime now) {
   }
 
   if (activeSlot >= 0) {
-    // Blink LCD backlight every 500 milliseconds.
     if (millis() - lastBlinkTime >= BLINK_INTERVAL_MS) {
       lastBlinkTime = millis();
       backlightOn = !backlightOn;
@@ -288,7 +469,6 @@ void updateLCD(DateTime now) {
     lcd.print(medicineNames[activeSlot].substring(0, 16));
   }
   else {
-    // Normal mode: display RTC time and date.
     backlightOn = true;
     lcd.backlight();
 
@@ -323,7 +503,6 @@ void updateLCD(DateTime now) {
 void setup() {
   Serial.begin(115200);
 
-  // Shared I2C bus for RTC and LCD.
   Wire.begin(21, 22);
 
   lcd.init();
@@ -337,6 +516,7 @@ void setup() {
   if (!rtc.begin()) {
     lcd.clear();
     lcd.print("RTC not found!");
+
     Serial.println("DS3231 RTC not found!");
 
     while (true) {
@@ -344,7 +524,7 @@ void setup() {
     }
   }
 
-  // Uncomment ONLY for the first upload to set RTC time.
+  // Uncomment for one upload if you need to set RTC time.
   // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   // Comment it again after setting the time.
 
@@ -365,16 +545,23 @@ void setup() {
     servos[i].write(0);
   }
 
+  // Snooze button connects GPIO 4 to GND.
+  pinMode(snoozeButtonPin, INPUT_PULLUP);
+
+  // GPIO 23 controls an external transistor for KEY1.
+  pinMode(speakerKeyPin, OUTPUT);
+  digitalWrite(speakerKeyPin, LOW);
+
   WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
 
-  Serial.print("Connecting to Wi-Fi");
+  Serial.print("Connecting to WiFi");
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
-  Serial.println("\nWi-Fi connected");
+  Serial.println("\nWiFi connected");
 
   Serial.print("ESP32 IP: ");
   Serial.println(WiFi.localIP());
@@ -383,7 +570,7 @@ void setup() {
   lcd.print("WiFi Connected");
   delay(1000);
   lcd.clear();
-  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+
   pollAlarms();
 }
 
@@ -391,7 +578,7 @@ void setup() {
 void loop() {
   DateTime now = rtc.now();
 
-  // Read all three independent buttons.
+  // Read the three compartment buttons.
   for (int i = 0; i < 3; i++) {
     int reading = digitalRead(buttonPins[i]);
 
@@ -412,16 +599,37 @@ void loop() {
     lastButtonReading[i] = reading;
   }
 
-  // Poll backend every two seconds.
+  // Read the snooze button.
+  int snoozeReading = digitalRead(snoozeButtonPin);
+
+  if (snoozeReading != lastSnoozeReading) {
+    lastSnoozeDebounceTime = millis();
+  }
+
+  if (millis() - lastSnoozeDebounceTime >= DEBOUNCE_MS) {
+    if (snoozeReading != stableSnoozeState) {
+      stableSnoozeState = snoozeReading;
+
+      if (stableSnoozeState == LOW) {
+        handleSnoozeButton();
+      }
+    }
+  }
+
+  lastSnoozeReading = snoozeReading;
+
+  // Fetch backend alarm status every 2 seconds.
   if (millis() - lastPollTime >= POLL_INTERVAL_MS) {
     lastPollTime = millis();
     pollAlarms();
   }
 
-  // Update LCD using RTC time.
+  // Trigger DFPlayer KEY1 every 5 seconds while due.
+  updateSpeakerTrigger();
+
   updateLCD(now);
 
-  // Print RTC time to Serial Monitor.
+  // Print RTC time every second.
   static unsigned long lastSerialTime = 0;
 
   if (millis() - lastSerialTime >= 1000) {
